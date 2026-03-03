@@ -1,0 +1,33 @@
+ Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.env
+venv/
+
+# Data — too large for git, stored on Gilbreth scratch
+*.npy
+*.pth
+*.zip
+*.tar
+*.gz
+
+# Training outputs
+runs/
+logs/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
