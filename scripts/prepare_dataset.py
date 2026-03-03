@@ -31,6 +31,7 @@ import argparse
 import glob
 import os
 import sys
+from collections import defaultdict
 from multiprocessing import Pool
 from pathlib import Path
 from typing import Optional
@@ -164,11 +165,26 @@ def process_clip(args: tuple) -> Optional[str]:
 
 
 def write_splits(stems: list, out_dir: str, train_frac: float):
+    # Stratified split by class prefix — ensures each interaction class
+    # is represented proportionally in both train and val.
+    # Random split caused train/val leakage when clips from the same
+    # road/session ended up in both sets, making val look artificially good.
+    groups = defaultdict(list)
+    for stem in stems:
+        parts  = stem.split()
+        prefix = " ".join(parts[:-1]) if parts[-1].isdigit() else stem
+        groups[prefix].append(stem)
+
     np.random.seed(42)
-    idx        = np.random.permutation(len(stems))
-    n_train    = int(len(stems) * train_frac)
-    train_stems = [stems[i] for i in idx[:n_train]]
-    val_stems   = [stems[i] for i in idx[n_train:]]
+    train_stems, val_stems = [], []
+
+    for prefix, group_stems in sorted(groups.items()):
+        shuffled = [group_stems[i] for i in np.random.permutation(len(group_stems))]
+        n_train  = max(1, int(len(shuffled) * train_frac))
+        if len(shuffled) > 1:
+            n_train = min(n_train, len(shuffled) - 1)  # at least 1 in val
+        train_stems.extend(shuffled[:n_train])
+        val_stems.extend(shuffled[n_train:])
 
     with open(os.path.join(out_dir, "train.txt"), "w") as f:
         f.write("\n".join(train_stems) + "\n")
