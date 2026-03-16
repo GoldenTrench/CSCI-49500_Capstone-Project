@@ -18,6 +18,7 @@ venv/
 # Training outputs
 runs/
 logs/
+eval_output/
 
 # Jupyter
 .ipynb_checkpoints/
