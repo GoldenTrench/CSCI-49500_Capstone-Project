@@ -44,8 +44,9 @@ def parse_args():
     p.add_argument("--base_filters", type=int,   default=16)
     p.add_argument("--num_classes",  type=int,   default=NUM_CLASSES)
     p.add_argument("--model",        type=str,   default="baseline",
-                   choices=["baseline", "asym", "psp"],
+                   choices=["baseline", "asym", "psp", "esp"],
                    help="baseline=original ST2CN, asym=asymmetric pooling variant, psp=pyramid pooling variant")
+    p.add_argument("--extra_channels", nargs="*", default=[], choices=["angle", "gradient"], help="Additional input channels for ablation")
     p.add_argument("--class_weights", action="store_true",
                    help="Use inverse-frequency class weights (didn't help in run 2)")
     p.add_argument("--amp",          action="store_true", default=True)
@@ -158,20 +159,26 @@ def main():
         batch_size   = args.batch_size,
         num_workers  = args.num_workers,
         stride_train = args.stride_train,
+        extra_channels  = args.extra_channels,
     )
 
     if args.model == "asym":
         from models.st2cn_asym import ST2CN_Asym
-        model = ST2CN_Asym(in_channels=4, num_classes=args.num_classes,
+        model = ST2CN_Asym(in_channels=4 + len(args.extra_channels), num_classes=args.num_classes,
                            base_filters=args.base_filters).to(device)
         print("Model: ST2CN_Asym (asymmetric pooling)")
     elif args.model == "psp":
         from models.st2cn_psp import ST2CN_PSP
-        model = ST2CN_PSP(in_channels=4, num_classes=args.num_classes,
+        model = ST2CN_PSP(in_channels=4 + len(args.extra_channels), num_classes=args.num_classes,
                           base_filters=args.base_filters).to(device)
         print("Model: ST2CN_PSP (pyramid pooling)")
+    elif args.model == "esp":
+        from models.st2cn_esp import ST2CN_ESP
+        model = ST2CN_ESP(in_channels=4 + len(args.extra_channels), num_classes=args.num_classes,
+                          base_filters=args.base_filters).to(device)
+        print("Model: ST2CN_ESP (ESPpyramid pooling)")
     else:
-        model = ST2CN(in_channels=4, num_classes=args.num_classes,
+        model = ST2CN(in_channels=4 + len(args.extra_channels), num_classes=args.num_classes,
                       base_filters=args.base_filters).to(device)
         print("Model: ST2CN baseline")
 

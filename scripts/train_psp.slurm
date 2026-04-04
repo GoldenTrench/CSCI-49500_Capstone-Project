@@ -9,7 +9,7 @@
 #SBATCH --output=logs/%j_train_psp.out
 #SBATCH --error=logs/%j_train_psp.err
 #SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=ddstephe@iu.edu
+#SBATCH --mail-user=ddstephe@purdue.edu
 
 # Experiment: PSPNet pyramid pooling module at the bottleneck
 # Replaces the 1x1 bottleneck conv with multi-scale adaptive pooling
@@ -38,7 +38,7 @@ python train.py \
     --base_filters 16 \
     --model        psp \
     --amp \
-    --eval_every   5 \
-    --resume       /scratch/gilbreth/ddstephe/runs/st2cn_asym_20260308_130303/checkpoints/epoch_086.pth
+    --eval_every   5 
+ 
 
 echo "Done. Results in $OUTPUT_DIR"

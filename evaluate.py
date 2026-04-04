@@ -12,9 +12,8 @@
 #   python evaluate.py \
 #       --checkpoint /scratch/gilbreth/$USER/runs/<run>/best_model.pth \
 #       --data_root  /scratch/gilbreth/$USER/vivm/prepared \
-#       --model      baseline          # or: asym
-#
-# Output: per-class IoU/F1 table + summary, same format as train.py
+#       --model      baseline          # or: asym, psp, esp
+#       --extra_channels angle         # or: gradient, or both
 
 import argparse
 import sys
@@ -43,29 +42,39 @@ from utils.metrics   import SegmentationMetrics
 
 def parse_args():
     p = argparse.ArgumentParser(description="Shift-mode evaluation")
-    p.add_argument("--checkpoint",   required=True,  help="Path to best_model.pth")
-    p.add_argument("--data_root",    required=True,  help="Path to prepared dataset root")
-    p.add_argument("--model",        default="baseline", choices=["baseline", "asym", "psp"],
+    p.add_argument("--checkpoint",     required=True,  help="Path to best_model.pth")
+    p.add_argument("--data_root",      required=True,  help="Path to prepared dataset root")
+    p.add_argument("--model",          default="baseline",
+                   choices=["baseline", "asym", "psp", "esp"],
                    help="Which model architecture was used")
-    p.add_argument("--batch_size",   type=int, default=16)
-    p.add_argument("--num_workers",  type=int, default=8)
-    p.add_argument("--base_filters", type=int, default=16)
-    p.add_argument("--output_dir",   type=str, default=None,
+    p.add_argument("--extra_channels", nargs="*", default=[],
+                   choices=["angle", "gradient"],
+                   help="Extra input channels used during training")
+    p.add_argument("--batch_size",     type=int, default=16)
+    p.add_argument("--num_workers",    type=int, default=8)
+    p.add_argument("--base_filters",   type=int, default=16)
+    p.add_argument("--output_dir",     type=str, default=None,
                    help="Directory to save confusion matrix image (optional)")
     return p.parse_args()
 
 
 def load_model(args, device):
+    in_ch = 4 + len(args.extra_channels)
+
     if args.model == "asym":
         from models.st2cn_asym import ST2CN_Asym
-        model = ST2CN_Asym(in_channels=4, num_classes=NUM_CLASSES,
+        model = ST2CN_Asym(in_channels=in_ch, num_classes=NUM_CLASSES,
                            base_filters=args.base_filters)
     elif args.model == "psp":
         from models.st2cn_psp import ST2CN_PSP
-        model = ST2CN_PSP(in_channels=4, num_classes=NUM_CLASSES,
+        model = ST2CN_PSP(in_channels=in_ch, num_classes=NUM_CLASSES,
+                          base_filters=args.base_filters)
+    elif args.model == "esp":
+        from models.st2cn_esp import ST2CN_ESP
+        model = ST2CN_ESP(in_channels=in_ch, num_classes=NUM_CLASSES,
                           base_filters=args.base_filters)
     else:
-        model = ST2CN(in_channels=4, num_classes=NUM_CLASSES,
+        model = ST2CN(in_channels=in_ch, num_classes=NUM_CLASSES,
                       base_filters=args.base_filters)
 
     ckpt = torch.load(args.checkpoint, map_location=device)
@@ -84,10 +93,12 @@ def load_model(args, device):
     return model
 
 
-def run_shiftmode_eval(model, data_root, batch_size, num_workers, device):
+def run_shiftmode_eval(model, data_root, batch_size, num_workers, device,
+                       extra_channels=None):
     # Returns (results_dict, metrics_obj) so caller can use print_table
     # stride=1 is shift-mode: every row gets a prediction
-    val_ds = VMVIDataset(data_root, split="val", stride=1, augment=False)
+    val_ds = VMVIDataset(data_root, split="val", stride=1, augment=False,
+                         extra_channels=extra_channels)
     val_loader = DataLoader(
         val_ds,
         batch_size=batch_size,
@@ -98,7 +109,8 @@ def run_shiftmode_eval(model, data_root, batch_size, num_workers, device):
 
     n_windows = len(val_ds)
     n_clips   = len(val_ds.clips)
-    print(f"Val set (shift-mode, stride=1): {n_windows:,} windows from {n_clips} clips")
+    print(f"Val set (shift-mode, stride=1): {n_windows:,} windows from {n_clips} clips  "
+          f"({val_ds.in_channels}ch)")
     print()
 
     metrics = SegmentationMetrics(num_classes=NUM_CLASSES)
@@ -136,9 +148,8 @@ def save_confusion_matrix(results, output_dir):
     cm    = results["confusion_matrix"].astype(np.float64)
     names = [c.replace("_", "\n") for c in INTERACTION_CLASSES]
 
-    # Normalize by true class totals (row-wise) so each row sums to 1
     row_sums = cm.sum(axis=1, keepdims=True)
-    row_sums[row_sums == 0] = 1      # avoid divide-by-zero for empty classes
+    row_sums[row_sums == 0] = 1
     cm_norm  = cm / row_sums
 
     fig, ax = plt.subplots(figsize=(14, 12))
@@ -153,7 +164,6 @@ def save_confusion_matrix(results, output_dir):
     ax.set_ylabel("True", fontsize=11)
     ax.set_title("Confusion Matrix (row-normalized)\nShift-Mode Evaluation", fontsize=13)
 
-    # Annotate cells with values >= 0.05 to keep it readable
     for i in range(NUM_CLASSES):
         for j in range(NUM_CLASSES):
             val = cm_norm[i, j]
@@ -176,8 +186,10 @@ def main():
     print(f"Device: {device}\n")
 
     model   = load_model(args, device)
-    results, metrics_obj = run_shiftmode_eval(model, args.data_root,
-                                 args.batch_size, args.num_workers, device)
+    results, metrics_obj = run_shiftmode_eval(
+        model, args.data_root, args.batch_size, args.num_workers, device,
+        extra_channels=args.extra_channels,
+    )
     print_results(results, metrics_obj)
 
     if args.output_dir:
@@ -186,30 +198,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

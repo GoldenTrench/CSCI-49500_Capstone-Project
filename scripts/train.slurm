@@ -9,7 +9,7 @@
 #SBATCH --output=logs/%j_train.out
 #SBATCH --error=logs/%j_train.err
 #SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=ddstephe@iu.edu
+#SBATCH --mail-user=ddstephe@purdue.edu
 
 # ---- Environment -----------------------------------------------------------
 module purge

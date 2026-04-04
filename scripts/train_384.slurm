@@ -9,7 +9,7 @@
 #SBATCH --output=logs/%j_train_384.out
 #SBATCH --error=logs/%j_train_384.err
 #SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=ddstephe@iu.edu
+#SBATCH --mail-user=ddstephe@purdue.edu
 
 # Experiment: width=384 vs baseline width=768
 # Smaller spatial resolution — tests whether 768 is too large (per advisor feedback)
