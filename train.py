@@ -54,6 +54,8 @@ def parse_args():
                    help="Path to checkpoint to resume from")
     p.add_argument("--eval_every",   type=int,   default=5)
     p.add_argument("--seed",         type=int,   default=42)
+    p.add_argument("--stratified", action="store_true",
+               help="Use WeightedRandomSampler to oversample rare classes")
     return p.parse_args()
 
 
@@ -155,11 +157,12 @@ def main():
     (out_dir / "config.json").write_text(json.dumps(vars(args), indent=2))
 
     train_loader, val_loader = get_dataloaders(
-        root         = args.data_root,
-        batch_size   = args.batch_size,
-        num_workers  = args.num_workers,
-        stride_train = args.stride_train,
+        root            = args.data_root,
+        batch_size      = args.batch_size,
+        num_workers     = args.num_workers,
+        stride_train    = args.stride_train,
         extra_channels  = args.extra_channels,
+        stratified      = args.stratified,
     )
 
     if args.model == "asym":
