@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 
 try:
     import matplotlib
@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from data.dataset    import VMVIDataset
 from models.st2cn    import ST2CN, NUM_CLASSES, INTERACTION_CLASSES
-from utils.metrics   import SegmentationMetrics
+from utils.metrics   import SegmentationMetrics, compute_tiou_from_traces
 
 
 def parse_args():
@@ -95,8 +95,6 @@ def load_model(args, device):
 
 def run_shiftmode_eval(model, data_root, batch_size, num_workers, device,
                        extra_channels=None):
-    # Returns (results_dict, metrics_obj) so caller can use print_table
-    # stride=1 is shift-mode: every row gets a prediction
     val_ds = VMVIDataset(data_root, split="val", stride=1, augment=False,
                          extra_channels=extra_channels)
     val_loader = DataLoader(
@@ -113,6 +111,19 @@ def run_shiftmode_eval(model, data_root, batch_size, num_workers, device,
           f"({val_ds.in_channels}ch)")
     print()
 
+    # ── Frame counts per class ────────────────────────────────────────────
+    print("Counting frames per class in val split...")
+    frame_counts = np.zeros(NUM_CLASSES, dtype=np.int64)
+    for stem in val_ds.clips:
+        label = np.load(Path(data_root) / stem / "label.npy", mmap_mode="r")
+        for c in range(NUM_CLASSES):
+            frame_counts[c] += int((label == c).any(axis=1).sum())
+    print("Val frame counts per class:")
+    for c, name in enumerate(INTERACTION_CLASSES):
+        print(f"  {name:20s}: {frame_counts[c]:,}")
+    print()
+
+    # ── Main eval loop (ST-IoU / pixel-wise) ─────────────────────────────
     metrics = SegmentationMetrics(num_classes=NUM_CLASSES)
 
     with torch.no_grad():
@@ -120,15 +131,81 @@ def run_shiftmode_eval(model, data_root, batch_size, num_workers, device,
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
 
-            logits = model(x)               # [B, C, 1, W]
-            preds  = logits.squeeze(2).argmax(dim=1)   # [B, W]
+            logits = model(x)
+            preds  = logits.squeeze(2).argmax(dim=1)
             metrics.update(preds, y)
 
             if (i + 1) % 200 == 0:
                 pct = 100.0 * (i + 1) / len(val_loader)
                 print(f"  [{i+1:5d}/{len(val_loader)}]  {pct:.1f}%", flush=True)
 
-    return metrics.compute(), metrics
+    results = metrics.compute()
+
+    # ── Approximate T-IoU (centre-column method, clip by clip) ───────────
+    print("\nComputing approximate T-IoU (centre-column method)...")
+    T = 256
+    W = 768
+    tiou_accum = {name: [] for name in INTERACTION_CLASSES[:-1]}  # exclude BG
+
+    with torch.no_grad():
+        for clip_idx, stem in enumerate(val_ds.clips):
+            input_full = np.load(Path(data_root) / stem / "input.npy",
+                                 mmap_mode="r")   # (1800, 768, 4)
+            label_full = np.load(Path(data_root) / stem / "label.npy",
+                                 mmap_mode="r")   # (1800, 768)
+            T_full     = input_full.shape[0]
+
+            # Build prediction map for this clip
+            pred_map = np.zeros((T_full, W), dtype=np.int64)
+
+            # Batch windows for this clip
+            windows, rows = [], []
+            for end_row in range(T - 1, T_full):
+                start_row = end_row - T + 1
+                if start_row < 0:
+                    pad   = -start_row
+                    patch = np.concatenate([
+                        np.zeros((pad, W, input_full.shape[2]), dtype=np.float32),
+                        np.array(input_full[0:end_row + 1]),
+                    ], axis=0)
+                else:
+                    patch = np.array(input_full[start_row:end_row + 1])
+                windows.append(patch.transpose(2, 0, 1))  # [C, T, W]
+                rows.append(end_row)
+
+                if len(windows) == batch_size or end_row == T_full - 1:
+                    x_batch = torch.tensor(np.stack(windows),
+                                           dtype=torch.float32).to(device)
+                    logits  = model(x_batch)
+                    preds   = logits.squeeze(2).argmax(dim=1).cpu().numpy()
+                    for pred_row, end_r in zip(preds, rows):
+                        pred_map[end_r] = pred_row
+                    windows, rows = [], []
+
+            # Compute T-IoU for this clip
+            clip_tiou = compute_tiou_from_traces(
+                pred_map, np.array(label_full), NUM_CLASSES
+            )
+            for name in INTERACTION_CLASSES[:-1]:
+                tiou_accum[name].append(clip_tiou.get(name, 0.0))
+
+            if (clip_idx + 1) % 10 == 0:
+                print(f"  T-IoU: {clip_idx+1}/{n_clips} clips done", flush=True)
+
+    # Average T-IoU across clips
+    tiou_results = {name: float(np.mean(vals))
+                    for name, vals in tiou_accum.items()}
+    tiou_results["mean"] = float(np.mean(list(tiou_results.values())))
+
+    print("\nApproximate T-IoU per class:")
+    for name in INTERACTION_CLASSES[:-1]:
+        print(f"  {name:20s}: {tiou_results[name]:.3f}")
+    print(f"  {'Mean (no bg)':20s}: {tiou_results['mean']:.3f}")
+
+    results["tiou"]        = tiou_results
+    results["frame_counts"] = {INTERACTION_CLASSES[c]: int(frame_counts[c])
+                                for c in range(NUM_CLASSES)}
+    return results, metrics
 
 
 def print_results(results, metrics_obj):
@@ -138,6 +215,8 @@ def print_results(results, metrics_obj):
     metrics_obj.print_table(results)
     print("=" * 70)
     print(f"\nSummary:  mIoU = {results['mean_iou']:.4f}   mF1 = {results['mean_f1']:.4f}")
+    if "tiou" in results:
+        print(f"          T-IoU (approx) = {results['tiou']['mean']:.4f}")
 
 
 def save_confusion_matrix(results, output_dir):
@@ -194,6 +273,15 @@ def main():
 
     if args.output_dir:
         save_confusion_matrix(results, args.output_dir)
+        # Save full results as JSON
+        import json
+        out_path = Path(args.output_dir) / "eval_results.json"
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+        # confusion matrix is not JSON serializable directly
+        results_save = {k: v for k, v in results.items()
+                        if k != "confusion_matrix"}
+        out_path.write_text(json.dumps(results_save, indent=2))
+        print(f"Results saved to: {out_path}")
 
 
 if __name__ == "__main__":
