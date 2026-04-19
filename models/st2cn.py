@@ -139,14 +139,53 @@ class ST2CN(nn.Module):
 
 
 class ST2CNLoss(nn.Module):
-    # Cross-entropy on the last temporal line only
-    def __init__(self, class_weights=None):
+    """
+    Focal loss with label smoothing for class-imbalanced interaction recognition.
+
+    Focal loss (Lin et al., 2017) down-weights easy examples and focuses
+    training on hard/rare classes (cut_in, merging).
+    Label smoothing prevents overconfidence and improves generalization.
+
+    Args:
+        class_weights  : optional per-class inverse-frequency weights
+        gamma          : focal modulation. 0 = standard CE, 2 = standard focal.
+        label_smoothing: smoothing epsilon. 0 = no smoothing.
+        ignore_index   : label value to ignore (default 255)
+    """
+    def __init__(self, class_weights=None, gamma=2.0,
+                 label_smoothing=0.1, ignore_index=255):
         super().__init__()
-        self.ce = nn.CrossEntropyLoss(weight=class_weights, ignore_index=255)
+        self.gamma           = gamma
+        self.label_smoothing = label_smoothing
+        self.ignore_index    = ignore_index
+        w = class_weights if class_weights is not None else torch.ones(NUM_CLASSES)
+        self.register_buffer("class_weights", w)
 
     def forward(self, logits, targets):
-        # logits: [B, C, 1, W] -> [B, C, W]; targets: [B, W]
-        return self.ce(logits.squeeze(2), targets)
+        # logits:  [B, C, 1, W] -> [B, C, W]
+        # targets: [B, W]
+        logits = logits.squeeze(2)
+
+        # Label-smoothed CE per pixel (reduction=none for focal weighting)
+        ce = F.cross_entropy(
+            logits, targets,
+            weight=self.class_weights.to(logits.device),
+            ignore_index=self.ignore_index,
+            label_smoothing=self.label_smoothing,
+            reduction="none",
+        )                                                   # [B, W]
+
+        # Focal modulation: (1 - p_t)^gamma
+        with torch.no_grad():
+            probs = F.softmax(logits, dim=1)               # [B, C, W]
+            tgt   = targets.clone()
+            tgt[tgt == self.ignore_index] = 0
+            p_t   = probs.gather(1, tgt.unsqueeze(1)).squeeze(1)  # [B, W]
+            focal = (1.0 - p_t) ** self.gamma              # [B, W]
+
+        loss  = focal * ce
+        valid = targets != self.ignore_index
+        return loss[valid].mean()
 
 
 if __name__ == "__main__":
