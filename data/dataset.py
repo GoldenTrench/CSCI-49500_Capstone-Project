@@ -32,6 +32,8 @@ from torch.utils.data import Dataset, DataLoader
 import sys; from pathlib import Path; sys.path.insert(0, str(Path(__file__).parent.parent))
 from models.st2cn import NUM_CLASSES
 
+from torch.utils.data import WeightedRandomSampler
+
 T_PATCH = 256
 W_PATCH = 768
 
@@ -137,7 +139,7 @@ class VMVIDataset(Dataset):
             ], axis=0)                                                         # (T, 768, 4)
         else:
             inp_patch = np.array(input_full[start_row : end_row + 1])         # (T, 768, 4)
-
+    
         # ── Extra channels ────────────────────────────────────────────────
         if self.extra_channels:
             extra_parts = []
@@ -177,7 +179,20 @@ class VMVIDataset(Dataset):
         x = inp_patch.transpose(2, 0, 1).astype(np.float32)
 
         return torch.from_numpy(x), torch.from_numpy(target.astype(np.int64))
-
+    def get_sample_weights(self):
+        rare_weights = {0: 10.0, 8: 8.0, 1: 4.0, 11: 4.0,
+                    12: 3.0, 10: 2.0, 3: 2.0}
+        print(f"Computing sample weights for {len(self.index):,} windows...")
+        weights = []
+        for i, (stem, end_row) in enumerate(self.index):
+            label = np.load(self.root / stem / "label.npy", mmap_mode="r")
+            row   = label[end_row]
+            w = max(rare_weights.get(int(c), 1.0) for c in np.unique(row))
+            weights.append(w)
+            if (i + 1) % 50000 == 0:
+                print(f"  {i+1:,}/{len(self.index):,} windows processed")
+        print("Sample weights computed.")
+        return weights
 
 def get_dataloaders(
     root:           str,
@@ -186,16 +201,29 @@ def get_dataloaders(
     stride_train:   int       = 1,
     stride_val:     int       = 30,
     extra_channels: Optional[List[str]] = None,
+    stratified:     bool      = False,
 ) -> Tuple[DataLoader, DataLoader]:
+    from torch.utils.data import WeightedRandomSampler
+
     train_ds = VMVIDataset(root, split="train", stride=stride_train,
                            augment=True,  extra_channels=extra_channels)
     val_ds   = VMVIDataset(root, split="val",   stride=stride_val,
                            augment=False, extra_channels=extra_channels)
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              num_workers=num_workers, pin_memory=True, drop_last=True)
-    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
-                              num_workers=num_workers, pin_memory=True)
+    if stratified:
+        weights = train_ds.get_sample_weights()
+        sampler = WeightedRandomSampler(weights, num_samples=len(weights),
+                                        replacement=True)
+        train_loader = DataLoader(train_ds, batch_size=batch_size,
+                                  sampler=sampler, num_workers=num_workers,
+                                  pin_memory=True, drop_last=True)
+    else:
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                                  num_workers=num_workers, pin_memory=True,
+                                  drop_last=True)
+
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
+                            num_workers=num_workers, pin_memory=True)
 
     print(f"Train: {len(train_ds):,} patches from {len(train_ds.clips)} clips  "
           f"({train_ds.in_channels}ch)")
