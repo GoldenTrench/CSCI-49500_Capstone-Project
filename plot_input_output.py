@@ -44,7 +44,7 @@ def parse_args():
     p.add_argument("--model_path", required=True)
     p.add_argument("--clip_idx", type=int, default=0)
     p.add_argument("--clip_name", type=str, default=None)
-    p.add_argument("--model", choices=["baseline", "asym", "psp"], default="baseline")
+    p.add_argument("--model", choices=['baseline', 'asym', 'psp', 'esp'], default="baseline")
     p.add_argument("--out", type=str, default="input_output.png")
     return p.parse_args()
 
@@ -70,9 +70,12 @@ def load_model(model_type, model_path, device):
     elif model_type == "asym":
         from models.st2cn_asym import ST2CN_Asym
         model = ST2CN_Asym(num_classes=NUM_CLASSES)
-    else:
+    elif model_type == "psp":
         from models.st2cn_psp import ST2CN_PSP
         model = ST2CN_PSP(num_classes=NUM_CLASSES)
+    elif model_type == "esp":
+        from models.st2cn_esp import ST2CN_ESP
+        model = ST2CN_ESP(num_classes=NUM_CLASSES)
     ckpt = torch.load(model_path, map_location=device)
     state = ckpt.get("model_state_dict", ckpt.get("model", ckpt))
     model.load_state_dict(state)

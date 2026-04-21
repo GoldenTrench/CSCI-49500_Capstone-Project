@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader
 
 try:
     import matplotlib
@@ -35,7 +35,7 @@ except ImportError:
 # Allow running from ~/capstone root
 sys.path.insert(0, str(Path(__file__).parent))
 
-from data.dataset    import VMVIDataset
+from data.dataset    import VMVIDataset, _load_png_channel
 from models.st2cn    import ST2CN, NUM_CLASSES, INTERACTION_CLASSES
 from utils.metrics   import SegmentationMetrics, compute_tiou_from_traces
 
@@ -93,8 +93,28 @@ def load_model(args, device):
     return model
 
 
+def load_clip_input(data_root, stem, extra_channels):
+    """Load input.npy and any extra channel PNGs for a clip, return (1800, 768, C) float32."""
+    input_full = np.load(Path(data_root) / stem / "input.npy", mmap_mode="r")  # (1800, 768, 4)
+    if not extra_channels:
+        return np.array(input_full, dtype=np.float32)
+
+    parts = [np.array(input_full, dtype=np.float32)]
+    clip_dir = Path(data_root) / stem
+    for ch in extra_channels:
+        folder_name = "angle_mp" if ch == "angle" else "gradient"
+        full_ch = _load_png_channel(clip_dir / folder_name).astype(np.float32)  # (1800, 768)
+        if ch == "angle":
+            full_ch = (full_ch - 127.5) / 127.5
+        else:
+            full_ch = full_ch / 255.0
+        parts.append(full_ch[:, :, np.newaxis])  # (1800, 768, 1)
+    return np.concatenate(parts, axis=2)  # (1800, 768, 4+N)
+
+
 def run_shiftmode_eval(model, data_root, batch_size, num_workers, device,
                        extra_channels=None):
+    extra_channels = extra_channels or []
     val_ds = VMVIDataset(data_root, split="val", stride=1, augment=False,
                          extra_channels=extra_channels)
     val_loader = DataLoader(
@@ -145,31 +165,29 @@ def run_shiftmode_eval(model, data_root, batch_size, num_workers, device,
     print("\nComputing approximate T-IoU (centre-column method)...")
     T = 256
     W = 768
-    tiou_accum = {name: [] for name in INTERACTION_CLASSES[:-1]}  # exclude BG
+    tiou_accum = {name: [] for name in INTERACTION_CLASSES[:-1]}
 
     with torch.no_grad():
         for clip_idx, stem in enumerate(val_ds.clips):
-            input_full = np.load(Path(data_root) / stem / "input.npy",
-                                 mmap_mode="r")   # (1800, 768, 4)
-            label_full = np.load(Path(data_root) / stem / "label.npy",
-                                 mmap_mode="r")   # (1800, 768)
+            # Load input with extra channels
+            input_full = load_clip_input(data_root, stem, extra_channels)  # (1800, 768, C)
+            label_full = np.load(Path(data_root) / stem / "label.npy", mmap_mode="r")
             T_full     = input_full.shape[0]
+            C          = input_full.shape[2]
 
-            # Build prediction map for this clip
             pred_map = np.zeros((T_full, W), dtype=np.int64)
 
-            # Batch windows for this clip
             windows, rows = [], []
             for end_row in range(T - 1, T_full):
                 start_row = end_row - T + 1
                 if start_row < 0:
                     pad   = -start_row
                     patch = np.concatenate([
-                        np.zeros((pad, W, input_full.shape[2]), dtype=np.float32),
-                        np.array(input_full[0:end_row + 1]),
+                        np.zeros((pad, W, C), dtype=np.float32),
+                        input_full[0:end_row + 1],
                     ], axis=0)
                 else:
-                    patch = np.array(input_full[start_row:end_row + 1])
+                    patch = input_full[start_row:end_row + 1]
                 windows.append(patch.transpose(2, 0, 1))  # [C, T, W]
                 rows.append(end_row)
 
@@ -182,7 +200,6 @@ def run_shiftmode_eval(model, data_root, batch_size, num_workers, device,
                         pred_map[end_r] = pred_row
                     windows, rows = [], []
 
-            # Compute T-IoU for this clip
             clip_tiou = compute_tiou_from_traces(
                 pred_map, np.array(label_full), NUM_CLASSES
             )
@@ -192,7 +209,6 @@ def run_shiftmode_eval(model, data_root, batch_size, num_workers, device,
             if (clip_idx + 1) % 10 == 0:
                 print(f"  T-IoU: {clip_idx+1}/{n_clips} clips done", flush=True)
 
-    # Average T-IoU across clips
     tiou_results = {name: float(np.mean(vals))
                     for name, vals in tiou_accum.items()}
     tiou_results["mean"] = float(np.mean(list(tiou_results.values())))
@@ -202,7 +218,7 @@ def run_shiftmode_eval(model, data_root, batch_size, num_workers, device,
         print(f"  {name:20s}: {tiou_results[name]:.3f}")
     print(f"  {'Mean (no bg)':20s}: {tiou_results['mean']:.3f}")
 
-    results["tiou"]        = tiou_results
+    results["tiou"]         = tiou_results
     results["frame_counts"] = {INTERACTION_CLASSES[c]: int(frame_counts[c])
                                 for c in range(NUM_CLASSES)}
     return results, metrics
@@ -273,11 +289,9 @@ def main():
 
     if args.output_dir:
         save_confusion_matrix(results, args.output_dir)
-        # Save full results as JSON
         import json
         out_path = Path(args.output_dir) / "eval_results.json"
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-        # confusion matrix is not JSON serializable directly
         results_save = {k: v for k, v in results.items()
                         if k != "confusion_matrix"}
         out_path.write_text(json.dumps(results_save, indent=2))
